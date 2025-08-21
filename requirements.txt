@@ -1,0 +1,6 @@
+aiosqlite
+jalali_core
+jdatetime
+loguru
+python-socks
+pyutilities @ git+https://github.com/pyhashem/PyUtilities.git#egg=[asyncio,telethon]
