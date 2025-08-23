@@ -77,21 +77,22 @@ async def worker_transfer_files():
 @events.register(events.NewMessage(pattern=TRIGGER, func=lambda e: e.is_private))
 async def handle_new_message(event):
     logger.info(f"New message received from user <g>{event.sender_id}</g>.")
-    # await event.respond(TRIGGER)
-    await event.mark_read()
-    # print(f"Event: {event.stringify()}")
-
 
     try:
-        eninity = await event.client.get_entity(event.sender_id)
+        await event.mark_read()
+
+        entity = await event.client.get_entity(event.sender_id)
         result = await event.client(functions.messages.GetPeerSettingsRequest(
-            peer=eninity
+            peer=entity
         ))
             
 
         # print(result.stringify())
-        registration_month = result.settings.registration_month
+        registration_month: str | None = result.settings.registration_month
 
+        if registration_month:
+            registration_month = f"{registration_month.split('.')[1]}-{registration_month.split('.')[0]}"
+        
         if not creation_dates.get(event.sender_id):
             creation_dates[event.sender_id] = {
                 'date': registration_month,
@@ -105,7 +106,6 @@ async def handle_new_message(event):
 
     except Exception as e:
         logger.error(f"Error handling new message from user {event.sender_id}: {e}")
-        return
 
 
 async def on_self_startup(retrys: int = 5) -> TelegramClient:
