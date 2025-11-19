@@ -1,23 +1,24 @@
+import logging
+logging.getLogger('telethon').setLevel(logging.NOTSET)
+
 import asyncio
 from pathlib import Path
 import shutil
 from loguru import logger
 from pyutilities import SESSION, PROXY
 from pyutilities.singlefunc import chunk_generate
+from collections import deque
 
 from telethon import TelegramClient, events, functions
 
 
 logger = logger.opt(colors=True)
-SELF_PATH: Path = Path('self/self.session')
+SELF_PATH: Path = Path('self')
+SELF_SESSIONS: list[Path] = []
 SESSIONS_PATH: Path = Path('sessions')
 CHUNK_SIZE: int = 100
 TRIGGER: str = '👋🏻'
-
-shared_data: dict = dict(
-    self_user_id=None,
-    self_username=None, # TODO if self not have username set it new to can send message 
-)
+self_usernames: deque = deque()
 
 creation_dates: dict[int, dict] = {}
 
@@ -108,12 +109,12 @@ async def handle_new_message(event):
         logger.error(f"Error handling new message from user {event.sender_id}: {e}")
 
 
-async def on_self_startup(retrys: int = 5) -> TelegramClient:
+async def on_self_startup(self_path: Path, retrys: int = 5) -> TelegramClient:
 
-    logger.info("Initiating self startup...")
+    logger.info(f"Initiating [{self_path.name}] self startup...")
 
-    session = SESSION(SELF_PATH)
-    client: TelegramClient = session.get_client(connection_retries=1, timeout=5)
+    session = SESSION(self_path)
+    client: TelegramClient = session.get_client(connection_retries=1, timeout=25)
     proxy = PROXY.getProxy()
 
     try:
@@ -128,9 +129,7 @@ async def on_self_startup(retrys: int = 5) -> TelegramClient:
             logger.error(f"{session.session_path.name} Account is None, skipping...")
             return None
         
-        shared_data['self_user_id'] = me.id
-        shared_data['self_username'] = me.username if me.username else None
-
+        self_usernames.append(me.username if me.username else None)
         logger.info(f"Self startup successful. Logged in as: <m>{me.first_name} ({me.id})</m>")
         
         return client
@@ -139,7 +138,7 @@ async def on_self_startup(retrys: int = 5) -> TelegramClient:
         logger.error("Failed to connect to Telegram with the provided proxy.")
         if retrys > 0:
             logger.info(f"Retrying self startup... ({retrys} attempts left)")
-            return await on_self_startup(retrys - 1)
+            return await on_self_startup(self_path, retrys - 1)
     
         else:
             logger.error("Max retries reached. Self startup failed.")
@@ -153,12 +152,17 @@ async def on_self_startup(retrys: int = 5) -> TelegramClient:
 async def session_client(session_path: Path, retrys: int = 5) -> None:
     """Create a Telegram client for a specific session."""
     session = SESSION(session_path)
-    client: TelegramClient = session.get_client(connection_retries=1, timeout=5)
+    client: TelegramClient = session.get_client(connection_retries=1, timeout=25)
     proxy = PROXY.getProxy()
 
+    target_username = get_traget_username()
+    if not target_username:
+        logger.error(f"{session.session_path.name} | {target_username} | No username found for self account, skipping...")
+        return None
+    
     try:
         if not proxy:
-            raise Exception(f"{session.session_path.name} | No proxy available for session.")
+            raise Exception(f"<C> {target_username} </C> |{session.session_path.name} | No proxy available for session.")
     
         client.set_proxy(proxy=proxy)
 
@@ -166,7 +170,7 @@ async def session_client(session_path: Path, retrys: int = 5) -> None:
 
         me = await client.get_me()
         if me is None:
-            logger.error(f"{session.session_path.name} Account is None, skipping...")
+            logger.error(f"<C> {target_username} </C> | {session.session_path.name} Account is None, skipping...")
             await client.disconnect()
             await asyncio.sleep(1)  # Wait for client to disconnect properly
 
@@ -187,16 +191,9 @@ async def session_client(session_path: Path, retrys: int = 5) -> None:
                 'date': None,
                 'path': session_path.as_posix(),
             }
-        
-        username: str | None = shared_data.get('self_username')
-        if not username:
-            logger.error(f"{session.session_path.name} | No username found for self account, skipping...")
-            await client.disconnect()
-            return None
-        
 
-        await client.send_message(username, TRIGGER)
-        logger.info('Message sent to self account to trigger registration date update.')
+        await client.send_message(target_username, TRIGGER)
+        logger.info(f'<C> {target_username} </C> | Message sent trigger registration date update.')
         await asyncio.sleep(1)  # Wait for the message to be processed
         await client.disconnect()
 
@@ -205,34 +202,39 @@ async def session_client(session_path: Path, retrys: int = 5) -> None:
         return
     
     except (ConnectionError, asyncio.TimeoutError, asyncio.IncompleteReadError, ValueError) as e:
-        logger.error(f"Failed to connect with session {session_path.name}: {e}")
+        logger.error(f"'<C> {target_username} </C> | Failed to connect with session {session_path.name}: {e}")
         if retrys > 0:
-            logger.info(f"Retrying session client for {session_path.name}... ({retrys} attempts left)")
+            logger.info(f"'<C> {target_username} </C> | Retrying session client for {session_path.name}... ({retrys} attempts left)")
             await client.disconnect()
             return await session_client(session_path, retrys - 1)
     
         else:
-            logger.error(f"Max retries reached for session {session_path.name}.")
+            logger.error(f"'<C> {target_username} </C> | Max retries reached for session {session_path.name}.")
             await client.disconnect()
             raise Exception(f"Session client failed after multiple attempts: {session_path.name}")
     
     except Exception as e:
-        logger.error(f"Error during session client creation for {session_path.name}: {e}")
+        logger.error(f"'<C> {target_username} </C> | Error during session client creation for {session_path.name}: {e}")
         await client.disconnect()
         return None
 
 
+def get_traget_username():
+    self_usernames.rotate(-1)
+    return self_usernames[0] if len(self_usernames) else None
+
 async def sessions_worker():
     """Worker to handle session-related tasks."""
-    logger.info("Starting sessions worker...")
-    sessions: list[Path] = [x for x in SESSIONS_PATH.iterdir() if x.is_file() and x.suffix == '.session']
-
-    if not sessions:
-        logger.warning("No session files found in the sessions directory.")
-        return
+    logger.info(f"Starting sessions worker...")
     
-    chunked_sessions = chunk_generate(sessions, chunk_size=CHUNK_SIZE)
-
+    sessions: list[Path] = [x for x in SESSIONS_PATH.iterdir() if x.is_file() and x.suffix == '.session']
+    if not sessions:
+      logger.warning("No session files found in the sessions directory.")
+      return
+    
+    chunked_sessions = list(chunk_generate(sessions, chunk_size=CHUNK_SIZE))
+    
+    
     for chunk in chunked_sessions:
         logger.info(f"Processing chunk of {len(chunk)} sessions...")
         await asyncio.gather(*(session_client(session) for session in chunk))
@@ -243,28 +245,35 @@ async def sessions_worker():
 
 
 async def main():
-    client: TelegramClient = None
+    SELF_SESSIONS: list[Path] = [x for x in SELF_PATH.iterdir() if x.suffix == '.session']
+    if len(SELF_SESSIONS) == 0:
+        raise ValueError(f'self sessions not exist in path : {SELF_PATH}')
+    
+    clients: list[TelegramClient] = []
 
-    try:
-        client: TelegramClient = await on_self_startup()
+    for session_path in SELF_SESSIONS:      
+        try:
+            client: TelegramClient = await on_self_startup(self_path=session_path)
+        
+        except Exception as e:
+            logger.error(f"{session_path} | Failed to start self client: {e}")
+            continue
+        
+        if not client:
+            logger.error(f"{session_path} | Client is None, exiting...")
+            continue
+        
+        client.add_event_handler(handle_new_message)
+        clients.append(client)
     
-    except Exception as e:
-        logger.error(f"Failed to start self client: {e}")
-        return
-    
-    if not client:
-        logger.error("Client is None, exiting...")
-        return
-    
-    client.add_event_handler(handle_new_message)
-
-    # loop.create_task(worker_transfer_files())
     await sessions_worker()
+
     logger.info("<c>Sessions worker Done.</c>")
 
 
-    await client.disconnect()
-    logger.info("Self client disconnected.")
+    for client in clients:
+        await client.disconnect()
+        logger.info(f"{client._self_id} | Self client disconnected.")
 
     # await client.run_until_disconnected()
 
@@ -282,9 +291,6 @@ if __name__ == "__main__":
             SESSIONS_PATH.mkdir(parents=True, exist_ok=True)
             raise Exception(f"Sessions directory is empty : {SESSIONS_PATH}")
         
-        if not SELF_PATH.exists():
-            raise Exception(f"Self session file does not exist in {SELF_PATH}")
-
         asyncio.set_event_loop(loop)
         loop.run_until_complete(main())
 
