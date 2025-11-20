@@ -9,7 +9,7 @@ from pyutilities import SESSION, PROXY
 from pyutilities.singlefunc import chunk_generate
 from collections import deque
 
-from telethon import TelegramClient, events, functions
+from telethon import TelegramClient, events, functions, errors
 
 
 logger = logger.opt(colors=True)
@@ -22,6 +22,15 @@ self_usernames: deque = deque()
 
 creation_dates: dict[int, dict] = {}
 
+def extract_freeze_dates(data: dict):
+    config_values = data.get("config", {}).get("value", [])
+    result = {}
+
+    for item in config_values:
+        if item.get("key") in ("freeze_since_date", "freeze_until_date"):
+            result[item["key"]] = item["value"]["value"]
+    
+    return result
 
 async def worker_transfer_files():
     """ Worker to transfer session files based on registration dates."""
@@ -186,6 +195,28 @@ async def session_client(session_path: Path, retrys: int = 5) -> None:
             await asyncio.sleep(1)  # Wait for client to disconnect properly
             return None
         
+        result = await client(functions.help.GetAppConfigRequest(hash=0))
+        freeze: dict = extract_freeze_dates(result.to_dict())
+
+        freeze_until_date: int = freeze.get('freeze_until_date')
+        freeze_since_date: int = freeze.get('freeze_since_date')
+
+        if freeze.get('freeze_since_date', 0) > 0:
+            await client.disconnect()
+            await asyncio.sleep(1)
+
+            logger.warning(f'{session_path.name} | Account Freeze Since {freeze_since_date} until : {freeze_until_date}')
+            destination_path = session_path.parent.joinpath(str('frozen'))
+            destination_path.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.move, session_path, destination_path.joinpath(session_path.name))
+                
+            session_json_path = session_path.with_suffix('.json')
+            if session_json_path.exists():
+                await asyncio.to_thread(shutil.move, session_json_path, destination_path.joinpath(session_json_path.name))
+            
+            await asyncio.sleep(0.5)
+            return None
+        
         if not creation_dates.get(me.id):
             creation_dates[me.id] = {
                 'date': None,
@@ -213,6 +244,22 @@ async def session_client(session_path: Path, retrys: int = 5) -> None:
             await client.disconnect()
             raise Exception(f"Session client failed after multiple attempts: {session_path.name}")
     
+    except (errors.rpcerrorlist.PeerFloodError) as e:
+        logger.warning(f'{session_path.name} | Account Spam!')
+        await client.disconnect()
+        await asyncio.sleep(1)
+
+        destination_path = session_path.parent.joinpath(str('spam_account'))
+        destination_path.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.move, session_path, destination_path.joinpath(session_path.name))
+                
+        session_json_path = session_path.with_suffix('.json')
+        if session_json_path.exists():
+            await asyncio.to_thread(shutil.move, session_json_path, destination_path.joinpath(session_json_path.name))
+            
+        await asyncio.sleep(0.5)
+        return None
+
     except Exception as e:
         logger.error(f"'<C> {target_username} </C> | Error during session client creation for {session_path.name}: {e}")
         await client.disconnect()
